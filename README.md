@@ -15,6 +15,7 @@ node dist/cli.js examples/invoices.csv examples/payments.csv          # text rep
 node dist/cli.js examples/invoices.csv examples/payments.csv --md     # Markdown
 node dist/cli.js examples/invoices.csv examples/payments.csv --json   # JSON
 node dist/cli.js examples/invoices.csv examples/payments.csv --csv    # one row per invoice, for a spreadsheet
+node dist/cli.js invoices.csv oct.csv nov.csv                          # several payments files, overlap removed
 ```
 
 Example output (from `examples/`):
@@ -46,6 +47,12 @@ Payments to check:
 **payments.csv**: header with `date`, `amount` and `reference`; optional `payer` and `id` (transaction id, must be
 unique, which catches a statement pasted twice). Rows with an amount of zero or below (debits, bank charges,
 reversals) are left out and counted.
+
+**Several payments files** (same columns, for example two statement exports whose date ranges overlap) can be given
+after the invoices file. A row whose transaction id is already in an earlier file is left out as overlap when its
+date and amount are the same, and is an input error when they differ. Rows without a transaction id are always kept
+(they cannot be told apart), and the report says how many there were. Reports then name payments as `file:row`
+(`nov.csv:4`); JSON adds `files`, `overlapRows` and `paymentsWithoutId`.
 
 Every column name can be changed with a flag (`--invoice-ref`, `--payment-reference`, ... see `--help`), so an
 export can be used as is. Bank export layouts differ; this tool does not guess them.

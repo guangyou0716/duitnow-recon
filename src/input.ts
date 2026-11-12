@@ -24,6 +24,8 @@ export interface Payment {
   payer?: string;
   id?: string;
   row: number;
+  /** Which payments file the row came from; set only when several payments files are merged. */
+  source?: string;
 }
 
 export interface InvoiceColumns {
@@ -144,10 +146,17 @@ export function parseDate(raw: string, where: string): { date: string; time?: st
   return time ? { date, time } : { date };
 }
 
+export interface SkippedRow {
+  row: number;
+  amountCents: number;
+  /** Set only when several payments files are merged. */
+  source?: string;
+}
+
 export interface PaymentParse {
   payments: Payment[];
   /** Data rows with an amount of zero or below (debits, reversals) that were left out. */
-  skipped: { row: number; amountCents: number }[];
+  skipped: SkippedRow[];
 }
 
 export function parsePayments(text: string, file = 'payments', cols: PaymentColumns = {}): PaymentParse {
@@ -159,7 +168,7 @@ export function parsePayments(text: string, file = 'payments', cols: PaymentColu
   const payerCol = optionalColumn(map, cols.payer, 'payer', file, '--payment-payer');
   const idCol = optionalColumn(map, cols.id, 'id', file, '--payment-id');
   const payments: Payment[] = [];
-  const skipped: PaymentParse['skipped'] = [];
+  const skipped: SkippedRow[] = [];
   const ids = new Map<string, number>();
   for (let r = 1; r < rows.length; r++) {
     const row = rows[r];
@@ -186,4 +195,64 @@ export function parsePayments(text: string, file = 'payments', cols: PaymentColu
     payments.push(payment);
   }
   return { payments, skipped };
+}
+
+/** A payment row left out because an earlier file already has the same transaction id, date and amount. */
+export interface OverlapRow {
+  source: string;
+  row: number;
+  id: string;
+  keptSource: string;
+  keptRow: number;
+}
+
+export interface MergedPayments extends PaymentParse {
+  /** Rows dropped as overlap between files (same transaction id, date and amount as a row in an earlier file). */
+  overlaps: OverlapRow[];
+  /** Payments without a transaction id; overlap between files cannot be checked for them. */
+  withoutId: number;
+}
+
+/**
+ * Merges payments from several files (for example two statement exports whose date ranges overlap). Each file is
+ * parsed on its own first, so a repeated transaction id inside one file is still an input error. A row whose
+ * transaction id already appeared in an earlier file is dropped as overlap when the date and amount are the same,
+ * and is an input error when they differ. Rows without a transaction id are always kept.
+ * With a single file nothing is labelled, so the result is the same as parsePayments.
+ */
+export function mergePayments(files: { label: string; parse: PaymentParse }[]): MergedPayments {
+  if (files.length === 1) {
+    const { payments, skipped } = files[0].parse;
+    return { payments, skipped, overlaps: [], withoutId: payments.filter((p) => !p.id).length };
+  }
+  const payments: Payment[] = [];
+  const skipped: SkippedRow[] = [];
+  const overlaps: OverlapRow[] = [];
+  const byId = new Map<string, Payment>();
+  let withoutId = 0;
+  for (const { label, parse } of files) {
+    for (const s of parse.skipped) skipped.push({ ...s, source: label });
+    const added: Payment[] = [];
+    for (const p of parse.payments) {
+      const payment: Payment = { ...p, source: label };
+      if (!payment.id) {
+        withoutId++;
+        payments.push(payment);
+        continue;
+      }
+      const earlier = byId.get(payment.id);
+      if (earlier) {
+        if (earlier.date !== payment.date || earlier.amountCents !== payment.amountCents) {
+          throw new InputError(`${label} row ${payment.row}: transaction id "${payment.id}" is also on ${earlier.source} row ${earlier.row} with a different date or amount.`);
+        }
+        overlaps.push({ source: label, row: payment.row, id: payment.id, keptSource: earlier.source!, keptRow: earlier.row });
+        continue;
+      }
+      added.push(payment);
+      payments.push(payment);
+    }
+    // Register after the whole file so ids are only compared against earlier files.
+    for (const p of added) byId.set(p.id!, p);
+  }
+  return { payments, skipped, overlaps, withoutId };
 }

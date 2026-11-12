@@ -87,7 +87,7 @@ describe('cli', () => {
 
   it('exits 2 on input errors', () => {
     expect(main([inv])).toBe(2);
-    expect(err).toContain('Give two files');
+    expect(err).toContain('Give at least two files');
     err = '';
     expect(main([inv, pay, '--json', '--csv'])).toBe(2);
     expect(err).toContain('only one of');
@@ -99,6 +99,48 @@ describe('cli', () => {
     err = '';
     expect(main([inv, tmp('p.csv', 'date,amount,reference\n2026-11-01,1.005,x\n')])).toBe(2);
     expect(err).toMatch(/p\.csv row 2: "1.005" is not an amount/);
+  });
+
+  it('merges several payments files and leaves out the overlap', () => {
+    const i = tmp('inv.csv', 'ref,amount\nA-1,10\nB-1,20\n');
+    const p1 = tmp('oct.csv', 'date,amount,reference,id\n2026-10-30,10,a1,T1\n2026-11-01,5,b1,T2\n');
+    const p2 = tmp('nov.csv', 'date,amount,reference,id\n2026-11-01,5,B1,T2\n2026-11-03,15,B-1 rest,T3\n2026-11-04,1,tip,\n');
+    expect(main([i, p1, p2])).toBe(1);
+    expect(out).toContain('Payments: 4 (3 matched, 0 ambiguous, 1 unmatched); from 2 files; 1 overlapping row(s) left out (same transaction id in an earlier file)');
+    expect(out).toContain('Note: 1 payment(s) have no transaction id, so overlap between files could not be checked for them.');
+    expect(out).toMatch(/nov\.csv:4 +2026-11-04 +1.00 +tip +no invoice found/);
+    out = '';
+    expect(main([i, p1, p2, '--json'])).toBe(1);
+    const data = JSON.parse(out);
+    expect(data.counts).toMatchObject({ paid: 2, unmatchedPayments: 1 });
+    expect(data.invoices[1].paymentRows).toEqual(['oct.csv:3', 'nov.csv:3']);
+    expect(data.overlapRows).toEqual([{ source: 'nov.csv', row: 2, id: 'T2', keptSource: 'oct.csv', keptRow: 3 }]);
+    expect(data.files).toBe(2);
+    expect(data.paymentsWithoutId).toBe(1);
+    out = '';
+    expect(main([i, p1, p2, '--md'])).toBe(1);
+    expect(out).toContain('| nov.csv:4 | 2026-11-04 | 1.00 | tip | no invoice found |');
+    out = '';
+    expect(main([i, p1, p2, '--csv'])).toBe(1);
+    expect(out).toContain('B-1,,,20.00,20.00,0.00,paid,reference,oct.csv:3 nov.csv:3');
+  });
+
+  it('keeps single-file JSON as before (no file fields)', () => {
+    expect(main([inv, pay, '--json'])).toBe(1);
+    const data = JSON.parse(out);
+    expect(data).not.toHaveProperty('overlapRows');
+    expect(data.payments[0]).not.toHaveProperty('source');
+  });
+
+  it('exits 2 on conflicting ids across files and on a file given twice', () => {
+    const i = tmp('inv.csv', 'ref,amount\nA-1,10\n');
+    const p1 = tmp('a.csv', 'date,amount,reference,id\n2026-11-01,10,a1,T1\n');
+    const p2 = tmp('b.csv', 'date,amount,reference,id\n2026-11-01,9,a1,T1\n');
+    expect(main([i, p1, p2])).toBe(2);
+    expect(err).toContain('b.csv row 2: transaction id "T1" is also on a.csv row 2 with a different date or amount');
+    err = '';
+    expect(main([i, p1, p1])).toBe(2);
+    expect(err).toContain('given twice');
   });
 
   it('prints help', () => {

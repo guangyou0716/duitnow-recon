@@ -1,21 +1,25 @@
 #!/usr/bin/env node
 import { readFileSync, realpathSync } from 'node:fs';
+import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { InputError } from './errors.js';
-import { parseInvoices, parsePayments } from './input.js';
+import { mergePayments, parseInvoices, parsePayments } from './input.js';
 import { findings, reconcile } from './reconcile.js';
 import { csvReport, jsonReport, markdownReport, textReport } from './report.js';
 
-const USAGE = `Usage: duitnow-recon <invoices.csv> <payments.csv> [options]
+const USAGE = `Usage: duitnow-recon <invoices.csv> <payments.csv> [more-payments.csv ...] [options]
 
 Matches incoming payments (a bank statement or DuitNow / transfer export saved as CSV) against the invoices you
 expect to be paid, and reports what is paid, partly paid, overpaid, unpaid, and which payments match nothing.
-Offline; reads two local files. Amounts are handled in exact cents.
+Offline; reads local files only. Amounts are handled in exact cents.
 
 invoices.csv: header with "ref" and "amount" columns; optional "customer" and "due_date".
 payments.csv: header with "date", "amount" and "reference" columns; optional "payer" and "id" (transaction id,
   must be unique). Rows with an amount of zero or below (debits, reversals) are left out and counted.
+Several payments files (same columns) are merged, e.g. two exports whose dates overlap: a row whose transaction id
+  is already in an earlier file is left out as overlap when date and amount agree, and is an input error when they
+  differ. Rows without an id are always kept. Reports then name payments as "file:row".
 Amounts: 1234.50, 1,234.50 or RM 1,234.50. Dates: 2026-11-12 or day-first 12/11/2026, optionally with a time.
 
 Matching:
@@ -52,6 +56,16 @@ function read(path: string, what: string): string {
   }
 }
 
+/** Short names for payments files in reports: the base name, or the path as given when two base names clash. */
+export function fileLabels(files: string[]): string[] {
+  const names = files.map((f) => basename(f));
+  const clash = (n: string) => names.filter((x) => x === n).length > 1;
+  if (new Set(files).size !== files.length) {
+    throw new InputError('The same payments file is given twice.');
+  }
+  return files.map((f, i) => (clash(names[i]) ? f : names[i]));
+}
+
 export function main(argv: string[]): number {
   try {
     const { values, positionals } = parseArgs({
@@ -78,29 +92,32 @@ export function main(argv: string[]): number {
       process.stdout.write(USAGE);
       return 0;
     }
-    if (positionals.length !== 2) {
-      throw new InputError('Give two files: <invoices.csv> <payments.csv> (see --help).');
+    if (positionals.length < 2) {
+      throw new InputError('Give at least two files: <invoices.csv> <payments.csv> [more-payments.csv ...] (see --help).');
     }
     if ([values.json, values.md, values.csv].filter(Boolean).length > 1) {
       throw new InputError('Use only one of --json, --md, --csv.');
     }
-    const [invoiceFile, paymentFile] = positionals;
+    const [invoiceFile, ...paymentFiles] = positionals;
     const invoices = parseInvoices(read(invoiceFile, 'invoices'), invoiceFile, {
       ref: values['invoice-ref'],
       amount: values['invoice-amount'],
       customer: values['invoice-customer'],
       dueDate: values['invoice-due'],
     });
-    const { payments, skipped } = parsePayments(read(paymentFile, 'payments'), paymentFile, {
+    const paymentColumns = {
       date: values['payment-date'],
       amount: values['payment-amount'],
       reference: values['payment-reference'],
       payer: values['payment-payer'],
       id: values['payment-id'],
-    });
-    const rec = reconcile(invoices, payments, { amountMatch: !values['no-amount-match'] });
+    };
+    const labels = fileLabels(paymentFiles);
+    const merged = mergePayments(paymentFiles.map((file, i) => ({ label: labels[i], parse: parsePayments(read(file, 'payments'), file, paymentColumns) })));
+    const rec = reconcile(invoices, merged.payments, { amountMatch: !values['no-amount-match'] });
+    const input = { skipped: merged.skipped, overlaps: merged.overlaps, files: paymentFiles.length, withoutId: merged.withoutId };
     process.stdout.write(
-      values.json ? jsonReport(rec, skipped) : values.md ? markdownReport(rec, skipped.length) : values.csv ? csvReport(rec) : textReport(rec, skipped.length),
+      values.json ? jsonReport(rec, input) : values.md ? markdownReport(rec, input) : values.csv ? csvReport(rec) : textReport(rec, input),
     );
     return findings(rec).length ? 1 : 0;
   } catch (e) {
