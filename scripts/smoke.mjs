@@ -77,6 +77,14 @@ if (split.status !== 1 || JSON.stringify(sd.counts) !== JSON.stringify(c) || JSO
 }
 console.log('smoke: ok same payments in two overlapping files -> same counts and totals, 2,000 overlapping rows left out');
 
+const aged = run(cli, [inv, pay, '--json', '--as-of', '2026-12-31']);
+const ad = aged.stdout ? JSON.parse(aged.stdout) : {};
+const bucket = ad.aging?.rows?.find((r) => r.bucket === '31-60 days');
+if (aged.status !== 1 || ad.aging?.asOf !== '2026-12-31' || bucket?.invoices !== 4 || bucket?.outstanding !== '2060.00') {
+  fail(`aging: status ${aged.status} ${JSON.stringify(ad.aging)} ${aged.stderr}`);
+}
+console.log('smoke: ok --as-of 2026-12-31 -> 4 invoices, 2,060.00 in 31-60 days');
+
 const bad = run(cli, [inv]);
 if (bad.status !== 2 || !bad.stderr.includes('Give at least two files')) {
   fail(`one file: status ${bad.status} ${bad.stderr}`);

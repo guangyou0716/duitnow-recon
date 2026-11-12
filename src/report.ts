@@ -12,11 +12,24 @@ function table(head: string[], rows: string[][], right: number[] = []): string[]
 
 const when = (p: PaymentResult) => (p.time ? `${p.date} ${p.time}` : p.date);
 
-function invoiceNote(inv: InvoiceResult): string {
-  if (inv.status === 'partial') return `short ${formatCents(-inv.differenceCents)}`;
-  if (inv.status === 'overpaid') return `over ${formatCents(inv.differenceCents)}`;
-  return inv.method === 'amount' ? 'by amount only' : '';
+function ageNote(days: number | undefined): string {
+  if (days === undefined) return '';
+  if (days > 0) return `${days} day(s) overdue`;
+  return days === 0 ? 'due today' : `due in ${-days} day(s)`;
 }
+
+function invoiceNote(inv: InvoiceResult): string {
+  const parts: string[] = [];
+  if (inv.status === 'partial') parts.push(`short ${formatCents(-inv.differenceCents)}`);
+  else if (inv.status === 'overpaid') parts.push(`over ${formatCents(inv.differenceCents)}`);
+  else if (inv.method === 'amount') parts.push('by amount only');
+  if (ageNote(inv.daysOverdue)) parts.push(ageNote(inv.daysOverdue));
+  return parts.join('; ');
+}
+
+const agingTitle = (rec: Reconciliation) =>
+  `Outstanding by age (as of ${rec.aging!.asOf}${rec.aging!.asOfSource === 'latest payment' ? ', the latest payment date' : ''})`;
+const agingRows = (rec: Reconciliation) => rec.aging!.rows.filter((r) => r.invoices > 0);
 
 function paymentNote(p: PaymentResult): string {
   if (p.status === 'ambiguous') return `same amount as ${p.candidates!.join(', ')}`;
@@ -69,6 +82,11 @@ export function textReport(rec: Reconciliation, input: InputInfo | number = 0): 
     out.push(...table(['Ref', 'Amount', 'Received', 'Status', 'Note'],
       open.map((i) => [i.ref, formatCents(i.amountCents), formatCents(i.receivedCents), i.status, invoiceNote(i)]), [1, 2]).map((l) => `  ${l}`));
   }
+  if (rec.aging && agingRows(rec).length) {
+    out.push('', `${agingTitle(rec)}:`);
+    out.push(...table(['Age', 'Invoices', 'Outstanding'],
+      agingRows(rec).map((r) => [r.bucket, String(r.invoices), formatCents(r.outstandingCents)]), [1, 2]).map((l) => `  ${l}`));
+  }
   const pays = rec.payments.filter(needsAttention);
   if (pays.length) {
     out.push('', 'Payments to check:');
@@ -92,6 +110,10 @@ export function markdownReport(rec: Reconciliation, input: InputInfo | number = 
   out.push(`- Invoiced ${formatCents(t.invoicedCents)}, received ${formatCents(t.receivedCents)}, outstanding ${formatCents(t.outstandingCents)}, overpaid ${formatCents(t.overpaidCents)}, not matched ${formatCents(t.unmatchedCents)}`);
   out.push('', '## Invoices', '', '| Ref | Amount | Received | Status | Note |', '| --- | ---: | ---: | --- | --- |');
   for (const inv of rec.invoices) out.push(`| ${md(inv.ref)} | ${formatCents(inv.amountCents)} | ${formatCents(inv.receivedCents)} | ${inv.status} | ${md(invoiceNote(inv))} |`);
+  if (rec.aging && agingRows(rec).length) {
+    out.push('', `## ${agingTitle(rec)}`, '', '| Age | Invoices | Outstanding |', '| --- | ---: | ---: |');
+    for (const r of agingRows(rec)) out.push(`| ${r.bucket} | ${r.invoices} | ${formatCents(r.outstandingCents)} |`);
+  }
   out.push('', '## Payments', '', '| Row | Date | Amount | Reference | Result |', '| ---: | --- | ---: | --- | --- |');
   for (const p of rec.payments) out.push(`| ${md(String(paymentLabel(p)))} | ${when(p)} | ${formatCents(p.amountCents)} | ${md(p.reference)} | ${md(paymentNote(p))} |`);
   const f = findings(rec);
@@ -109,6 +131,7 @@ export function jsonReport(rec: Reconciliation, input: InputInfo | SkippedRow[] 
     invoices: rec.invoices.map(({ amountCents, receivedCents, differenceCents, ...rest }) => ({ ...rest, amount: money(amountCents), received: money(receivedCents), difference: money(differenceCents) })),
     payments: rec.payments.map(({ amountCents, excessCents, ...rest }) => ({ ...rest, amount: money(amountCents), excess: money(excessCents) })),
     skippedRows: (i.skipped ?? []).map(({ amountCents, ...rest }) => ({ ...rest, amount: money(amountCents) })),
+    ...(rec.aging ? { aging: { ...rec.aging, rows: rec.aging.rows.map(({ outstandingCents, ...rest }) => ({ ...rest, outstanding: money(outstandingCents) })) } } : {}),
     ...(multi ? { files: i.files, overlapRows: i.overlaps ?? [], paymentsWithoutId: i.withoutId ?? 0 } : {}),
     findings: findings(rec),
   }, null, 2)}\n`;
@@ -116,10 +139,11 @@ export function jsonReport(rec: Reconciliation, input: InputInfo | SkippedRow[] 
 
 const csvCell = (s: string) => (/[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
 
-/** One row per invoice, for a spreadsheet. */
+/** One row per invoice, for a spreadsheet. With aging, a last column days_overdue (empty when not aged). */
 export function csvReport(rec: Reconciliation): string {
-  const head = ['ref', 'customer', 'due_date', 'amount', 'received', 'difference', 'status', 'method', 'payment_rows'];
+  const aged = rec.aging !== undefined;
+  const head = ['ref', 'customer', 'due_date', 'amount', 'received', 'difference', 'status', 'method', 'payment_rows', ...(aged ? ['days_overdue'] : [])];
   const rows = rec.invoices.map((i) => [i.ref, i.customer ?? '', i.dueDate ?? '', plainCents(i.amountCents), plainCents(i.receivedCents),
-    plainCents(i.differenceCents), i.status, i.method ?? '', i.paymentRows.join(' ')]);
+    plainCents(i.differenceCents), i.status, i.method ?? '', i.paymentRows.join(' '), ...(aged ? [i.daysOverdue === undefined ? '' : String(i.daysOverdue)] : [])]);
   return `${[head, ...rows].map((r) => r.map(csvCell).join(',')).join('\n')}\n`;
 }

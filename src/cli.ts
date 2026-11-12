@@ -3,8 +3,9 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { addAging, latestPaymentDate } from './aging.js';
 import { InputError } from './errors.js';
-import { mergePayments, parseInvoices, parsePayments } from './input.js';
+import { mergePayments, parseDate, parseInvoices, parsePayments } from './input.js';
 import { findings, reconcile } from './reconcile.js';
 import { csvReport, jsonReport, markdownReport, textReport } from './report.js';
 
@@ -41,8 +42,13 @@ Options:
   --payment-payer <col>     payer name column (default payer, used when present)
   --payment-id <col>        transaction id column (default id, used when present)
   --no-amount-match         only match by reference
+  --as-of <date>            count overdue days to this date (default: the latest payment date)
   --json | --md | --csv     report format (default text; --csv gives one row per invoice)
   -h, --help                show this help
+
+Aging: when an invoice that still owes money has a due date (or --as-of is given), what is still owed is grouped
+  by days past due: not yet due, 1-30, 31-60, 61-90, over 90 days, no due date. A due date on the as-of day counts
+  as not yet due. Paid and overpaid invoices are not aged. --csv then adds a days_overdue column.
 
 Exit codes: 0 every invoice paid exactly and every payment matched by reference, 1 anything to check
 (unpaid, partial, overpaid, possible duplicate, ambiguous, unmatched, matched by amount only), 2 input error.
@@ -82,6 +88,7 @@ export function main(argv: string[]): number {
         'payment-payer': { type: 'string' },
         'payment-id': { type: 'string' },
         'no-amount-match': { type: 'boolean', default: false },
+        'as-of': { type: 'string' },
         json: { type: 'boolean', default: false },
         md: { type: 'boolean', default: false },
         csv: { type: 'boolean', default: false },
@@ -114,7 +121,18 @@ export function main(argv: string[]): number {
     };
     const labels = fileLabels(paymentFiles);
     const merged = mergePayments(paymentFiles.map((file, i) => ({ label: labels[i], parse: parsePayments(read(file, 'payments'), file, paymentColumns) })));
-    const rec = reconcile(invoices, merged.payments, { amountMatch: !values['no-amount-match'] });
+    const asOfOption = values['as-of'] === undefined ? undefined : parseDate(values['as-of'], '--as-of');
+    if (asOfOption?.time) {
+      throw new InputError('--as-of: give a date only (2026-11-12 or 12/11/2026), without a time.');
+    }
+    let rec = reconcile(invoices, merged.payments, { amountMatch: !values['no-amount-match'] });
+    const owedWithDue = rec.invoices.some((inv) => inv.differenceCents < 0 && inv.dueDate !== undefined);
+    if (asOfOption) {
+      rec = addAging(rec, asOfOption.date, 'option');
+    } else if (owedWithDue) {
+      const latest = latestPaymentDate(rec);
+      if (latest) rec = addAging(rec, latest, 'latest payment');
+    }
     const input = { skipped: merged.skipped, overlaps: merged.overlaps, files: paymentFiles.length, withoutId: merged.withoutId };
     process.stdout.write(
       values.json ? jsonReport(rec, input) : values.md ? markdownReport(rec, input) : values.csv ? csvReport(rec) : textReport(rec, input),
