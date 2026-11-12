@@ -16,6 +16,7 @@ node dist/cli.js examples/invoices.csv examples/payments.csv --md     # Markdown
 node dist/cli.js examples/invoices.csv examples/payments.csv --json   # JSON
 node dist/cli.js examples/invoices.csv examples/payments.csv --csv    # one row per invoice, for a spreadsheet
 node dist/cli.js invoices.csv oct.csv nov.csv                          # several payments files, overlap removed
+node dist/cli.js invoices.csv payments.csv --as-of 2026-12-31          # age what is owed to a chosen date
 ```
 
 Example output (from `examples/`):
@@ -28,9 +29,15 @@ Invoiced 5,205.40, received 4,587.40, outstanding 2,060.00, overpaid 1,250.00, n
 Invoices to check:
   Ref         Amount  Received  Status    Note
   INV-1001  1,250.00  2,500.00  overpaid  over 1,250.00
-  INV-1003  2,000.00  1,000.00  partial   short 1,000.00
+  INV-1003  2,000.00  1,000.00  partial   short 1,000.00; 2 day(s) overdue
   INV-1005     99.90     99.90  paid      by amount only
+  INV-1006    760.00      0.00  unpaid    due today
   ...
+Outstanding by age (as of 2026-11-12, the latest payment date):
+  Age          Invoices  Outstanding
+  not yet due         3     1,060.00
+  1-30 days           1     1,000.00
+
 Payments to check:
   Row  Date                Amount  Reference         Result
     5  2026-11-09 11:00  1,250.00  Payment inv 1001  -> INV-1001 (possible duplicate: already paid)
@@ -75,6 +82,19 @@ export can be used as is. Bank export layouts differ; this tool does not guess t
 
 Short numeric references (for example `1001`) can match unrelated numbers in a reference text; use prefixed
 references (`INV-1001`) where you can.
+
+## Aging of what is still owed
+
+When an unpaid or partly paid invoice has a `due_date` (or `--as-of` is given), the report groups what is still
+owed by days past due: **not yet due**, **1-30**, **31-60**, **61-90**, **over 90 days**, and **no due date**.
+Days are counted to `--as-of` (a date, `2026-12-31` or `31/12/2026`), or by default to the latest payment date in
+the input, so the same files always give the same report (with no payments at all, aging needs `--as-of`).
+An invoice due on the as-of day counts as not yet due.
+Paid and overpaid invoices are not aged; the buckets add up to the outstanding total.
+
+The invoice notes say `N day(s) overdue`, `due today` or `due in N day(s)`; JSON adds `aging` (as-of date, its
+source, every bucket with count and amount) and `daysOverdue` per aged invoice; `--csv` adds a last column
+`days_overdue`. Aging never changes the exit code (unpaid and partial invoices already give exit 1).
 
 ## Exit codes
 

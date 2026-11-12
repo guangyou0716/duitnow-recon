@@ -1,3 +1,5 @@
+export { addAging, ageBucket, AGE_BUCKETS, daysPastDue, latestPaymentDate } from './aging.js';
+export type { AgeBucket, AgeRow, Aging } from './aging.js';
 export { InputError } from './errors.js';
 export { mergePayments, parseDate, parseInvoices, parsePayments, referenceKey } from './input.js';
 export type { Invoice, InvoiceColumns, MergedPayments, OverlapRow, Payment, PaymentColumns, PaymentParse, SkippedRow } from './input.js';

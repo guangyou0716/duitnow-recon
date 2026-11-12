@@ -1,5 +1,6 @@
 import { referenceKey } from './input.js';
 import type { Invoice, Payment } from './input.js';
+import type { Aging } from './aging.js';
 
 export type MatchMethod = 'reference' | 'amount';
 
@@ -21,6 +22,11 @@ export interface InvoiceResult {
    */
   paymentRows: (number | string)[];
   method?: MatchMethod;
+  /**
+   * Set only when aging is added (see addAging) and the invoice still owes money and has a due date: whole days
+   * past the due date (0 = due that day, negative = not yet due).
+   */
+  daysOverdue?: number;
 }
 
 export type PaymentStatus = 'matched' | 'ambiguous' | 'unmatched';
@@ -66,6 +72,8 @@ export interface Reconciliation {
   payments: PaymentResult[];
   counts: Record<InvoiceStatus, number> & { unmatchedPayments: number; ambiguousPayments: number; amountMatches: number; possibleDuplicates: number };
   totals: Totals;
+  /** Outstanding amounts by age; present only when aging was added (see addAging). */
+  aging?: Aging;
 }
 
 const SPLIT = /[\s,;:/\\|#()[\]{}<>"']+/u;

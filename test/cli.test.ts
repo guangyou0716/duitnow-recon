@@ -62,9 +62,55 @@ describe('cli', () => {
     out = '';
     expect(main([inv, pay, '--csv'])).toBe(1);
     const lines = out.trim().split('\n');
-    expect(lines[0]).toBe('ref,customer,due_date,amount,received,difference,status,method,payment_rows');
-    expect(lines[1]).toBe('INV-1001,Kedai Runcit Ali,2026-11-05,1250.00,2500.00,1250.00,overpaid,reference,2 5');
+    expect(lines[0]).toBe('ref,customer,due_date,amount,received,difference,status,method,payment_rows,days_overdue');
+    expect(lines[1]).toBe('INV-1001,Kedai Runcit Ali,2026-11-05,1250.00,2500.00,1250.00,overpaid,reference,2 5,');
+    expect(lines[3]).toBe('INV-1003,Lim Hardware,2026-11-10,2000.00,1000.00,-1000.00,partial,reference,4,2');
     expect(lines).toHaveLength(9);
+  });
+
+  it('ages what is still owed, to the latest payment date by default', () => {
+    expect(main([inv, pay])).toBe(1);
+    expect(out).toMatch(/INV-1003 +2,000.00 +1,000.00 +partial +short 1,000.00; 2 day\(s\) overdue/);
+    expect(out).toMatch(/INV-1006 +760.00 +0.00 +unpaid +due today/);
+    expect(out).toMatch(/INV-1007 +150.00 +0.00 +unpaid +due in 3 day\(s\)/);
+    expect(out).toContain('Outstanding by age (as of 2026-11-12, the latest payment date):');
+    expect(out).toMatch(/not yet due +3 +1,060.00/);
+    expect(out).toMatch(/1-30 days +1 +1,000.00/);
+    expect(out).not.toMatch(/31-60 days/);
+    out = '';
+    expect(main([inv, pay, '--json', '--as-of', '31/12/2026'])).toBe(1);
+    const data = JSON.parse(out);
+    expect(data.aging.asOf).toBe('2026-12-31');
+    expect(data.aging.asOfSource).toBe('option');
+    expect(data.aging.rows.find((r: { bucket: string }) => r.bucket === '31-60 days')).toEqual({ bucket: '31-60 days', invoices: 4, outstanding: '2060.00' });
+    expect(data.invoices.find((i: { ref: string }) => i.ref === 'INV-1003').daysOverdue).toBe(51);
+    expect(data.invoices.find((i: { ref: string }) => i.ref === 'INV-1002').daysOverdue).toBeUndefined();
+    out = '';
+    expect(main([inv, pay, '--md'])).toBe(1);
+    expect(out).toContain('## Outstanding by age (as of 2026-11-12, the latest payment date)');
+    expect(out).toContain('| not yet due | 3 | 1,060.00 |');
+  });
+
+  it('leaves aging out when nothing owed has a due date, unless --as-of is given', () => {
+    const i = tmp('i.csv', 'ref,amount\nA-1,10\nB-1,20\n');
+    const p = tmp('p.csv', 'date,amount,reference\n2026-11-01,10,a1\n');
+    expect(main([i, p])).toBe(1);
+    expect(out).not.toContain('Outstanding by age');
+    out = '';
+    expect(main([i, p, '--csv'])).toBe(1);
+    expect(out.split('\n')[0]).toBe('ref,customer,due_date,amount,received,difference,status,method,payment_rows');
+    out = '';
+    expect(main([i, p, '--as-of', '2026-11-30'])).toBe(1);
+    expect(out).toContain('Outstanding by age (as of 2026-11-30):');
+    expect(out).toMatch(/no due date +1 +20.00/);
+  });
+
+  it('rejects a bad --as-of', () => {
+    expect(main([inv, pay, '--as-of', '2026-02-30'])).toBe(2);
+    expect(err).toContain('--as-of: "2026-02-30" is not a real calendar date');
+    err = '';
+    expect(main([inv, pay, '--as-of', '2026-11-12 10:00'])).toBe(2);
+    expect(err).toContain('--as-of: give a date only');
   });
 
   it('exits 0 when everything matches by reference', () => {
