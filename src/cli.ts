@@ -32,6 +32,10 @@ Matching:
      Otherwise it is reported as ambiguous (same amount as several invoices) or unmatched.
      With --amount-window <days>, only invoices whose due date is at most that many days before or after the
      payment date count for this (invoices without a due date are then never matched by amount).
+  Payer hint: for an ambiguous or unmatched payment with a payer name, invoices that still owe money and whose
+     customer name looks like the payer are listed as a hint (case, punctuation and Sdn Bhd / Berhad / PLT / S/B
+     ignored; a payer name cut short by the bank still counts when it has at least two words). A hint never pays
+     an invoice and never changes the exit code.
 
 Options:
   --invoice-ref <col>       invoice reference column (default ref)

@@ -85,6 +85,12 @@ export can be used as is. Bank export layouts differ; this tool does not guess t
    invoices instead of both being ambiguous. Invoices without a due date are then never matched by amount; the
    option needs a due date column and cannot be combined with `--no-amount-match`. Reports name the window
    (JSON `amountWindowDays`). Reference matching is never limited by date.
+4. **Payer hint** (never a match). For an ambiguous or unmatched payment that has a `payer`, the invoices that still
+   owe money and whose `customer` looks like the payer are listed as a hint ("payer looks like customer of INV-7
+   (hint only)"; JSON `payerHints`, count `counts.payerHints`). Case, punctuation and legal-form words (Sdn Bhd,
+   Berhad, PLT, S/B, (M), ...) are ignored; a name cut short by the bank still counts when the shorter name has at
+   least two words (its last word may be cut too), and a single word must equal a single word. Invoices still
+   owing exactly the payment amount come first. A hint never pays an invoice and never changes the exit code.
 
 Short numeric references (for example `1001`) can match unrelated numbers in a reference text; use prefixed
 references (`INV-1001`) where you can.
@@ -122,7 +128,7 @@ CI runs the same on Node 20 and 22. The library is exported from `src/index.ts` 
 ## Limits
 
 - Matching rules only; it does not read PDFs or bank portals and does not call any payment API.
-- No fuzzy name matching on payer names (planned as an optional hint, not an automatic match).
+- Payer names give hints only (prefix rules, no fuzzy spelling match); they never allocate a payment.
 - Not accounting advice; check flagged rows by hand.
 
 MIT licence.
