@@ -15,8 +15,11 @@ export interface InvoiceResult {
   /** received - amount: negative = still owed, positive = paid too much. */
   differenceCents: number;
   status: InvoiceStatus;
-  /** Data rows of the payments that went to this invoice, in payment order. */
-  paymentRows: number[];
+  /**
+   * Data rows of the payments that went to this invoice, in payment order. With several payments files each entry
+   * is "file:row" instead of a row number.
+   */
+  paymentRows: (number | string)[];
   method?: MatchMethod;
 }
 
@@ -24,6 +27,8 @@ export type PaymentStatus = 'matched' | 'ambiguous' | 'unmatched';
 
 export interface PaymentResult {
   row: number;
+  /** Payments file, set only when several files are merged. */
+  source?: string;
   date: string;
   time?: string;
   id?: string;
@@ -89,20 +94,25 @@ export function findReferences(text: string, byKey: Map<string, Invoice>): Invoi
   return found;
 }
 
-const byDate = (a: Payment, b: Payment) =>
-  a.date < b.date ? -1 : a.date > b.date ? 1 : (a.time ?? '') < (b.time ?? '') ? -1 : (a.time ?? '') > (b.time ?? '') ? 1 : a.row - b.row;
+/** How a payment is named in reports: its row number, or "file:row" when several files are merged. */
+export const paymentLabel = (p: { row: number; source?: string }): number | string => (p.source === undefined ? p.row : `${p.source}:${p.row}`);
 
 export function reconcile(invoices: Invoice[], payments: Payment[], options: ReconcileOptions = {}): Reconciliation {
   const amountMatch = options.amountMatch ?? true;
   const byKey = new Map(invoices.map((inv) => [inv.key, inv]));
   const received = new Map<Invoice, number>(invoices.map((inv) => [inv, 0]));
-  const rowsOf = new Map<Invoice, number[]>(invoices.map((inv) => [inv, []]));
+  const rowsOf = new Map<Invoice, (number | string)[]>(invoices.map((inv) => [inv, []]));
   const methodOf = new Map<Invoice, MatchMethod>();
   const results = new Map<Payment, PaymentResult>();
+  // Date, then time, then input order (file order, then row).
+  const order = new Map(payments.map((p, i) => [p, i]));
+  const byDate = (a: Payment, b: Payment) =>
+    a.date < b.date ? -1 : a.date > b.date ? 1 : (a.time ?? '') < (b.time ?? '') ? -1 : (a.time ?? '') > (b.time ?? '') ? 1 : order.get(a)! - order.get(b)!;
   const ordered = [...payments].sort(byDate);
 
   const base = (p: Payment): PaymentResult => {
     const r: PaymentResult = { row: p.row, date: p.date, reference: p.reference, amountCents: p.amountCents, status: 'unmatched', invoices: [], excessCents: 0, possibleDuplicate: false };
+    if (p.source !== undefined) r.source = p.source;
     if (p.time) r.time = p.time;
     if (p.id) r.id = p.id;
     if (p.payer) r.payer = p.payer;
@@ -111,7 +121,8 @@ export function reconcile(invoices: Invoice[], payments: Payment[], options: Rec
   const give = (inv: Invoice, p: Payment, cents: number, method: MatchMethod) => {
     received.set(inv, received.get(inv)! + cents);
     const rows = rowsOf.get(inv)!;
-    if (!rows.includes(p.row)) rows.push(p.row);
+    const label = paymentLabel(p);
+    if (!rows.includes(label)) rows.push(label);
     if (methodOf.get(inv) !== 'reference') methodOf.set(inv, method);
   };
 

@@ -63,8 +63,22 @@ if (res.status !== 1 || c.paid !== 19500 || c.unpaid !== 500 || c.amountMatches 
 }
 console.log(`smoke: ok 20,000 invoices / ${payRows.length - 1} payments in ${Date.now() - started} ms (19,500 paid incl. 500 by amount, 500 unpaid)`);
 
+// The same payments split into two exports that overlap by 2,000 rows: same result, overlap reported.
+const body = payRows.slice(1);
+const cut = Math.floor(body.length / 2);
+const partA = join(dir, 'pay-a.csv');
+const partB = join(dir, 'pay-b.csv');
+writeFileSync(partA, `${[payRows[0], ...body.slice(0, cut + 1000)].join('\n')}\n`);
+writeFileSync(partB, `${[payRows[0], ...body.slice(cut - 1000)].join('\n')}\n`);
+const split = run(cli, [bigInv, partA, partB, '--json']);
+const sd = split.stdout ? JSON.parse(split.stdout) : {};
+if (split.status !== 1 || JSON.stringify(sd.counts) !== JSON.stringify(c) || JSON.stringify(sd.totals) !== JSON.stringify(data.totals) || sd.overlapRows?.length !== 2000) {
+  fail(`split run: status ${split.status} ${JSON.stringify(sd.counts)} overlaps ${sd.overlapRows?.length} ${split.stderr}`);
+}
+console.log('smoke: ok same payments in two overlapping files -> same counts and totals, 2,000 overlapping rows left out');
+
 const bad = run(cli, [inv]);
-if (bad.status !== 2 || !bad.stderr.includes('Give two files')) {
+if (bad.status !== 2 || !bad.stderr.includes('Give at least two files')) {
   fail(`one file: status ${bad.status} ${bad.stderr}`);
 }
 console.log('smoke: ok one file -> exit 2');
