@@ -66,6 +66,9 @@ function paymentsLine(rec: Reconciliation, i: Info): string {
 const idNote = (i: InputInfo) =>
   i.files && i.files > 1 && i.withoutId ? `Note: ${i.withoutId} payment(s) have no transaction id, so overlap between files could not be checked for them.` : '';
 
+const windowNote = (rec: Reconciliation) =>
+  rec.amountWindowDays === undefined ? '' : `Amount-only matching limited to invoices due within ${rec.amountWindowDays} day(s) of the payment date.`;
+
 const needsAttention = (p: PaymentResult) => p.status !== 'matched' || p.method === 'amount' || p.possibleDuplicate || p.excessCents > 0;
 
 export function textReport(rec: Reconciliation, input: InputInfo | number = 0): string {
@@ -75,6 +78,7 @@ export function textReport(rec: Reconciliation, input: InputInfo | number = 0): 
   out.push(`Invoices: ${rec.invoices.length} (${c.paid} paid, ${c.partial} partial, ${c.overpaid} overpaid, ${c.unpaid} unpaid)`);
   out.push(paymentsLine(rec, i));
   if (idNote(i)) out.push(idNote(i));
+  if (windowNote(rec)) out.push(windowNote(rec));
   out.push(`Invoiced ${formatCents(t.invoicedCents)}, received ${formatCents(t.receivedCents)}, outstanding ${formatCents(t.outstandingCents)}, overpaid ${formatCents(t.overpaidCents)}, not matched ${formatCents(t.unmatchedCents)}`);
   const open = rec.invoices.filter((i) => i.status !== 'paid' || i.method === 'amount');
   if (open.length) {
@@ -107,6 +111,7 @@ export function markdownReport(rec: Reconciliation, input: InputInfo | number = 
   out.push(`- Invoices: ${rec.invoices.length} (${c.paid} paid, ${c.partial} partial, ${c.overpaid} overpaid, ${c.unpaid} unpaid)`);
   out.push(`- ${paymentsLine(rec, i)}`);
   if (idNote(i)) out.push(`- ${idNote(i)}`);
+  if (windowNote(rec)) out.push(`- ${windowNote(rec)}`);
   out.push(`- Invoiced ${formatCents(t.invoicedCents)}, received ${formatCents(t.receivedCents)}, outstanding ${formatCents(t.outstandingCents)}, overpaid ${formatCents(t.overpaidCents)}, not matched ${formatCents(t.unmatchedCents)}`);
   out.push('', '## Invoices', '', '| Ref | Amount | Received | Status | Note |', '| --- | ---: | ---: | --- | --- |');
   for (const inv of rec.invoices) out.push(`| ${md(inv.ref)} | ${formatCents(inv.amountCents)} | ${formatCents(inv.receivedCents)} | ${inv.status} | ${md(invoiceNote(inv))} |`);
@@ -132,6 +137,7 @@ export function jsonReport(rec: Reconciliation, input: InputInfo | SkippedRow[] 
     payments: rec.payments.map(({ amountCents, excessCents, ...rest }) => ({ ...rest, amount: money(amountCents), excess: money(excessCents) })),
     skippedRows: (i.skipped ?? []).map(({ amountCents, ...rest }) => ({ ...rest, amount: money(amountCents) })),
     ...(rec.aging ? { aging: { ...rec.aging, rows: rec.aging.rows.map(({ outstandingCents, ...rest }) => ({ ...rest, outstanding: money(outstandingCents) })) } } : {}),
+    ...(rec.amountWindowDays !== undefined ? { amountWindowDays: rec.amountWindowDays } : {}),
     ...(multi ? { files: i.files, overlapRows: i.overlaps ?? [], paymentsWithoutId: i.withoutId ?? 0 } : {}),
     findings: findings(rec),
   }, null, 2)}\n`;

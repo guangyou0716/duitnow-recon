@@ -1,6 +1,7 @@
 import { referenceKey } from './input.js';
 import type { Invoice, Payment } from './input.js';
 import type { Aging } from './aging.js';
+import { daysPastDue } from './aging.js';
 
 export type MatchMethod = 'reference' | 'amount';
 
@@ -56,6 +57,12 @@ export interface PaymentResult {
 export interface ReconcileOptions {
   /** Match payments without a usable reference by unique amount (default true). */
   amountMatch?: boolean;
+  /**
+   * Only for the amount fallback: pair a payment with an invoice only when the invoice's due date is at most this
+   * many days before or after the payment date. Invoices without a due date are then never matched by amount.
+   * Leave unset for no date limit.
+   */
+  amountWindowDays?: number;
 }
 
 export interface Totals {
@@ -74,6 +81,8 @@ export interface Reconciliation {
   totals: Totals;
   /** Outstanding amounts by age; present only when aging was added (see addAging). */
   aging?: Aging;
+  /** The date window used for the amount fallback, in days; present only when one was set. */
+  amountWindowDays?: number;
 }
 
 const SPLIT = /[\s,;:/\\|#()[\]{}<>"']+/u;
@@ -107,6 +116,9 @@ export const paymentLabel = (p: { row: number; source?: string }): number | stri
 
 export function reconcile(invoices: Invoice[], payments: Payment[], options: ReconcileOptions = {}): Reconciliation {
   const amountMatch = options.amountMatch ?? true;
+  if (options.amountWindowDays !== undefined && !(Number.isInteger(options.amountWindowDays) && options.amountWindowDays >= 0)) {
+    throw new RangeError('amountWindowDays must be a whole number of days, 0 or more');
+  }
   const byKey = new Map(invoices.map((inv) => [inv.key, inv]));
   const received = new Map<Invoice, number>(invoices.map((inv) => [inv, 0]));
   const rowsOf = new Map<Invoice, (number | string)[]>(invoices.map((inv) => [inv, []]));
@@ -166,7 +178,9 @@ export function reconcile(invoices: Invoice[], payments: Payment[], options: Rec
     results.set(p, r);
   }
 
-  // Pass 2: unreferenced payments matched by amount, only when the pairing is unique both ways.
+  // Pass 2: unreferenced payments matched by amount, only when the pairing is unique both ways (within the date
+  // window when one is set).
+  const window = options.amountWindowDays;
   const openByAmount = new Map<number, Invoice[]>();
   for (const inv of invoices) {
     if (received.get(inv) !== 0) continue;
@@ -174,14 +188,47 @@ export function reconcile(invoices: Invoice[], payments: Payment[], options: Rec
     if (list) list.push(inv);
     else openByAmount.set(inv.amountCents, [inv]);
   }
-  const paymentsByAmount = new Map<number, number>();
-  for (const p of unreferenced) paymentsByAmount.set(p.amountCents, (paymentsByAmount.get(p.amountCents) ?? 0) + 1);
+  // With a window: per amount, the invoices that have a due date sorted by due day, so each payment's candidates
+  // are one contiguous slice found by binary search (input order kept inside the slice for stable output).
+  const dueDay = (isoDate: string) => daysPastDue('1970-01-01', isoDate);
+  const datedByAmount = new Map<number, { day: number; inv: Invoice; i: number }[]>();
+  if (window !== undefined) {
+    for (const [amount, list] of openByAmount) {
+      const dated = list.flatMap((inv, i) => (inv.dueDate === undefined ? [] : [{ day: dueDay(inv.dueDate), inv, i }]));
+      dated.sort((a, b) => a.day - b.day || a.i - b.i);
+      datedByAmount.set(amount, dated);
+    }
+  }
+  const firstAtOrAfter = (xs: { day: number }[], day: number) => {
+    let lo = 0;
+    let hi = xs.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (xs[mid].day < day) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  const candidatesOf = new Map<Payment, Invoice[]>();
+  const claims = new Map<Invoice, number>();
+  for (const p of unreferenced) {
+    let candidates: Invoice[];
+    if (window === undefined) {
+      candidates = openByAmount.get(p.amountCents) ?? [];
+    } else {
+      const dated = datedByAmount.get(p.amountCents) ?? [];
+      const day = dueDay(p.date);
+      candidates = dated.slice(firstAtOrAfter(dated, day - window), firstAtOrAfter(dated, day + window + 1)).sort((a, b) => a.i - b.i).map((x) => x.inv);
+    }
+    candidatesOf.set(p, candidates);
+    for (const inv of candidates) claims.set(inv, (claims.get(inv) ?? 0) + 1);
+  }
   for (const p of unreferenced) {
     const r = base(p);
     results.set(p, r);
     if (!amountMatch) continue;
-    const candidates = openByAmount.get(p.amountCents) ?? [];
-    if (candidates.length === 1 && paymentsByAmount.get(p.amountCents) === 1) {
+    const candidates = candidatesOf.get(p)!;
+    if (candidates.length === 1 && claims.get(candidates[0]) === 1) {
       r.status = 'matched';
       r.method = 'amount';
       r.invoices = [candidates[0].ref];
@@ -222,7 +269,9 @@ export function reconcile(invoices: Invoice[], payments: Payment[], options: Rec
     outstandingCents: sum(invoiceResults.map((i) => Math.max(0, -i.differenceCents))),
     overpaidCents: sum(invoiceResults.map((i) => Math.max(0, i.differenceCents))),
   };
-  return { invoices: invoiceResults, payments: paymentResults, counts, totals };
+  const rec: Reconciliation = { invoices: invoiceResults, payments: paymentResults, counts, totals };
+  if (window !== undefined && amountMatch) rec.amountWindowDays = window;
+  return rec;
 }
 
 /** Human-readable findings; an empty list means every invoice is paid exactly and every payment is matched. */
