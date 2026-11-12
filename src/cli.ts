@@ -30,6 +30,8 @@ Matching:
   2. Amount (unless --no-amount-match): a payment with no reference found is matched to an invoice that has no
      money yet when it is the only such invoice with that exact amount and the only such payment with that amount.
      Otherwise it is reported as ambiguous (same amount as several invoices) or unmatched.
+     With --amount-window <days>, only invoices whose due date is at most that many days before or after the
+     payment date count for this (invoices without a due date are then never matched by amount).
 
 Options:
   --invoice-ref <col>       invoice reference column (default ref)
@@ -42,6 +44,7 @@ Options:
   --payment-payer <col>     payer name column (default payer, used when present)
   --payment-id <col>        transaction id column (default id, used when present)
   --no-amount-match         only match by reference
+  --amount-window <days>    amount matching only for invoices due within <days> of the payment date
   --as-of <date>            count overdue days to this date (default: the latest payment date)
   --json | --md | --csv     report format (default text; --csv gives one row per invoice)
   -h, --help                show this help
@@ -88,6 +91,7 @@ export function main(argv: string[]): number {
         'payment-payer': { type: 'string' },
         'payment-id': { type: 'string' },
         'no-amount-match': { type: 'boolean', default: false },
+        'amount-window': { type: 'string' },
         'as-of': { type: 'string' },
         json: { type: 'boolean', default: false },
         md: { type: 'boolean', default: false },
@@ -125,7 +129,17 @@ export function main(argv: string[]): number {
     if (asOfOption?.time) {
       throw new InputError('--as-of: give a date only (2026-11-12 or 12/11/2026), without a time.');
     }
-    let rec = reconcile(invoices, merged.payments, { amountMatch: !values['no-amount-match'] });
+    let amountWindowDays: number | undefined;
+    if (values['amount-window'] !== undefined) {
+      if (values['no-amount-match']) throw new InputError('Use either --amount-window or --no-amount-match, not both.');
+      const raw = values['amount-window'].trim();
+      if (!/^\d{1,4}$/.test(raw)) throw new InputError(`--amount-window: give a whole number of days from 0 to 9999, not "${values['amount-window']}".`);
+      amountWindowDays = Number(raw);
+      if (!invoices.some((inv) => inv.dueDate !== undefined)) {
+        throw new InputError('--amount-window needs invoice due dates (a due_date column, or --invoice-due), and none were found.');
+      }
+    }
+    let rec = reconcile(invoices, merged.payments, { amountMatch: !values['no-amount-match'], amountWindowDays });
     const owedWithDue = rec.invoices.some((inv) => inv.differenceCents < 0 && inv.dueDate !== undefined);
     if (asOfOption) {
       rec = addAging(rec, asOfOption.date, 'option');

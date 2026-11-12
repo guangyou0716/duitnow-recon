@@ -79,6 +79,12 @@ export can be used as is. Bank export layouts differ; this tool does not guess t
    no money yet only when that invoice is the only open one with that exact amount **and** the payment is the only
    unreferenced payment with that amount. These matches are labelled "by amount only" and always count as something
    to check. Otherwise the payment is **ambiguous** (lists the invoices with the same amount) or **unmatched**.
+3. **Date window for the amount fallback** (`--amount-window <days>`, optional). Only invoices whose `due_date` is
+   at most that many days before or after the payment date count as candidates, and the pairing must still be
+   unique both ways inside the window. This lets two monthly RM 250.00 payments go to the October and November
+   invoices instead of both being ambiguous. Invoices without a due date are then never matched by amount; the
+   option needs a due date column and cannot be combined with `--no-amount-match`. Reports name the window
+   (JSON `amountWindowDays`). Reference matching is never limited by date.
 
 Short numeric references (for example `1001`) can match unrelated numbers in a reference text; use prefixed
 references (`INV-1001`) where you can.
