@@ -31,9 +31,16 @@ const agingTitle = (rec: Reconciliation) =>
   `Outstanding by age (as of ${rec.aging!.asOf}${rec.aging!.asOfSource === 'latest payment' ? ', the latest payment date' : ''})`;
 const agingRows = (rec: Reconciliation) => rec.aging!.rows.filter((r) => r.invoices > 0);
 
+function hintNote(p: PaymentResult): string {
+  if (!p.payerHints) return '';
+  const shown = p.payerHints.slice(0, 3).join(', ');
+  const more = p.payerHints.length > 3 ? ` +${p.payerHints.length - 3} more` : '';
+  return `; payer looks like customer of ${shown}${more} (hint only)`;
+}
+
 function paymentNote(p: PaymentResult): string {
-  if (p.status === 'ambiguous') return `same amount as ${p.candidates!.join(', ')}`;
-  if (p.status === 'unmatched') return 'no invoice found';
+  if (p.status === 'ambiguous') return `same amount as ${p.candidates!.join(', ')}${hintNote(p)}`;
+  if (p.status === 'unmatched') return `no invoice found${hintNote(p)}`;
   const parts = [`-> ${p.invoices.join(', ')}`];
   if (p.method === 'amount') parts.push('(by amount only)');
   if (p.possibleDuplicate) parts.push('(possible duplicate: already paid)');

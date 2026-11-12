@@ -52,6 +52,12 @@ export interface PaymentResult {
   excessCents: number;
   /** Every referenced invoice was already fully paid by an earlier payment. */
   possibleDuplicate: boolean;
+  /**
+   * Only for ambiguous and unmatched payments with a payer name: invoices that still owe money and whose customer
+   * name looks like the payer (see namesMatch). A hint for a person to check; it never allocates the payment.
+   * Invoices still owing exactly the payment amount come first, then input order.
+   */
+  payerHints?: string[];
 }
 
 export interface ReconcileOptions {
@@ -77,12 +83,42 @@ export interface Totals {
 export interface Reconciliation {
   invoices: InvoiceResult[];
   payments: PaymentResult[];
-  counts: Record<InvoiceStatus, number> & { unmatchedPayments: number; ambiguousPayments: number; amountMatches: number; possibleDuplicates: number };
+  counts: Record<InvoiceStatus, number> & { unmatchedPayments: number; ambiguousPayments: number; amountMatches: number; possibleDuplicates: number; payerHints: number };
   totals: Totals;
   /** Outstanding amounts by age; present only when aging was added (see addAging). */
   aging?: Aging;
   /** The date window used for the amount fallback, in days; present only when one was set. */
   amountWindowDays?: number;
+}
+
+/** Legal-form and filler words left out when comparing payer and customer names. */
+const NAME_FILLER = new Set(['SDN', 'BHD', 'BERHAD', 'PLT', 'LLP', 'LTD', 'LIMITED', 'INC', 'CO', 'COMPANY', 'CORP', 'THE', 'AND', 'M', 'SB']);
+
+/**
+ * Words of a payer or customer name for comparison: case, full-width forms and punctuation ignored,
+ * "S/B", "(M)", "Sdn Bhd", "Berhad", "PLT" and similar legal-form words left out.
+ */
+export function nameWords(name: string): string[] {
+  return name
+    .normalize('NFKC')
+    .toUpperCase()
+    .replace(/\bS\s*\/\s*B\b/gu, ' ')
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((w) => w !== '' && !NAME_FILLER.has(w));
+}
+
+/**
+ * True when two names look like the same party: the same words in the same order, or one is the start of the other
+ * (bank exports often cut payer names short), where the shorter one has at least two words and its last word may
+ * itself be cut short. A single word must match a single word exactly, so "TAN" alone never matches "TAN AH KOW".
+ */
+export function namesMatch(a: string[], b: string[]): boolean {
+  if (a.length === 0 || b.length === 0) return false;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (short.length === 1) return long.length === 1 && short[0] === long[0];
+  for (let i = 0; i < short.length - 1; i++) if (short[i] !== long[i]) return false;
+  const last = short.length - 1;
+  return long[last].startsWith(short[last]);
 }
 
 const SPLIT = /[\s,;:/\\|#()[\]{}<>"']+/u;
@@ -251,14 +287,16 @@ export function reconcile(invoices: Invoice[], payments: Payment[], options: Rec
     return res;
   });
   const paymentResults = ordered.map((p) => results.get(p)!);
+  addPayerHints(invoices, invoiceResults, paymentResults);
 
-  const counts = { paid: 0, partial: 0, overpaid: 0, unpaid: 0, unmatchedPayments: 0, ambiguousPayments: 0, amountMatches: 0, possibleDuplicates: 0 };
+  const counts = { paid: 0, partial: 0, overpaid: 0, unpaid: 0, unmatchedPayments: 0, ambiguousPayments: 0, amountMatches: 0, possibleDuplicates: 0, payerHints: 0 };
   for (const inv of invoiceResults) counts[inv.status]++;
   for (const p of paymentResults) {
     if (p.status === 'unmatched') counts.unmatchedPayments++;
     if (p.status === 'ambiguous') counts.ambiguousPayments++;
     if (p.method === 'amount') counts.amountMatches++;
     if (p.possibleDuplicate) counts.possibleDuplicates++;
+    if (p.payerHints) counts.payerHints++;
   }
   const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
   const totals: Totals = {
@@ -272,6 +310,73 @@ export function reconcile(invoices: Invoice[], payments: Payment[], options: Rec
   const rec: Reconciliation = { invoices: invoiceResults, payments: paymentResults, counts, totals };
   if (window !== undefined && amountMatch) rec.amountWindowDays = window;
   return rec;
+}
+
+type NameCandidate = { words: string[]; res: InvoiceResult; i: number };
+
+/**
+ * Sets payerHints on ambiguous and unmatched payments that have a payer name. Customers with one name word are
+ * looked up exactly; customers with more words are grouped by first word and sorted by second word, so a payer only
+ * meets customers whose second word starts with the payer's (binary search) or is a start of it (direct lookups).
+ * namesMatch then decides. Results are cached per payer name.
+ */
+function addPayerHints(invoices: Invoice[], invoiceResults: InvoiceResult[], payments: PaymentResult[]): void {
+  const single = new Map<string, NameCandidate[]>();
+  const multi = new Map<string, { sorted: NameCandidate[]; bySecond: Map<string, NameCandidate[]> }>();
+  invoiceResults.forEach((res, i) => {
+    const customer = invoices[i].customer;
+    if (customer === undefined || res.differenceCents >= 0) return;
+    const words = nameWords(customer);
+    if (words.length === 0) return;
+    const c = { words, res, i };
+    if (words.length === 1) {
+      const list = single.get(words[0]);
+      if (list) list.push(c);
+      else single.set(words[0], [c]);
+      return;
+    }
+    let group = multi.get(words[0]);
+    if (!group) multi.set(words[0], (group = { sorted: [], bySecond: new Map() }));
+    group.sorted.push(c);
+    const list = group.bySecond.get(words[1]);
+    if (list) list.push(c);
+    else group.bySecond.set(words[1], [c]);
+  });
+  for (const group of multi.values()) group.sorted.sort((a, b) => (a.words[1] < b.words[1] ? -1 : a.words[1] > b.words[1] ? 1 : 0));
+
+  const candidates = (words: string[]): NameCandidate[] => {
+    if (words.length === 1) return single.get(words[0]) ?? [];
+    const group = multi.get(words[0]);
+    if (!group) return [];
+    const second = words[1];
+    const found: NameCandidate[] = [];
+    let lo = 0;
+    let hi = group.sorted.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (group.sorted[mid].words[1] < second) lo = mid + 1;
+      else hi = mid;
+    }
+    for (let k = lo; k < group.sorted.length && group.sorted[k].words[1].startsWith(second); k++) found.push(group.sorted[k]);
+    for (let len = 1; len < second.length; len++) found.push(...(group.bySecond.get(second.slice(0, len)) ?? []));
+    return found;
+  };
+
+  const cache = new Map<string, NameCandidate[]>();
+  for (const p of payments) {
+    if (p.status === 'matched' || p.payer === undefined) continue;
+    const words = nameWords(p.payer);
+    if (words.length === 0) continue;
+    const key = words.join(' ');
+    let hits = cache.get(key);
+    if (!hits) {
+      hits = candidates(words).filter((c) => namesMatch(words, c.words));
+      cache.set(key, hits);
+    }
+    if (hits.length === 0) continue;
+    const exact = (c: NameCandidate) => (-c.res.differenceCents === p.amountCents ? 0 : 1);
+    p.payerHints = [...hits].sort((a, b) => exact(a) - exact(b) || a.i - b.i).map((c) => c.res.ref);
+  }
 }
 
 /** Human-readable findings; an empty list means every invoice is paid exactly and every payment is matched. */
