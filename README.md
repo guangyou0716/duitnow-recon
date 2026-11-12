@@ -1,3 +1,95 @@
 # duitnow-recon
 
-Offline CLI: match bank / DuitNow payments to invoices. MVP in progress.
+Offline CLI that matches incoming payments (a bank statement or DuitNow / transfer export saved as CSV) against the
+invoices you expect to be paid, and tells you what is **paid**, **partly paid**, **overpaid**, **unpaid**, which
+payments are **possible duplicates**, and which payments match **nothing**. Amounts are exact integer cents.
+
+Built for small Malaysian businesses that take DuitNow / IBG / bank transfers and reconcile them by hand in a
+spreadsheet. No network, no API keys, no runtime dependencies; it reads two local CSV files.
+
+## Usage
+
+```sh
+npm ci && npm run build
+node dist/cli.js examples/invoices.csv examples/payments.csv          # text report
+node dist/cli.js examples/invoices.csv examples/payments.csv --md     # Markdown
+node dist/cli.js examples/invoices.csv examples/payments.csv --json   # JSON
+node dist/cli.js examples/invoices.csv examples/payments.csv --csv    # one row per invoice, for a spreadsheet
+```
+
+Example output (from `examples/`):
+
+```
+Invoices: 8 (3 paid, 1 partial, 1 overpaid, 3 unpaid)
+Payments: 7 (5 matched, 1 ambiguous, 1 unmatched); 1 debit/zero row(s) left out
+Invoiced 5,205.40, received 4,587.40, outstanding 2,060.00, overpaid 1,250.00, not matched 192.00
+
+Invoices to check:
+  Ref         Amount  Received  Status    Note
+  INV-1001  1,250.00  2,500.00  overpaid  over 1,250.00
+  INV-1003  2,000.00  1,000.00  partial   short 1,000.00
+  INV-1005     99.90     99.90  paid      by amount only
+  ...
+Payments to check:
+  Row  Date                Amount  Reference         Result
+    5  2026-11-09 11:00  1,250.00  Payment inv 1001  -> INV-1001 (possible duplicate: already paid)
+    6  2026-11-10 08:30     99.90  servis motor      -> INV-1005 (by amount only)
+    8  2026-11-11 12:00    150.00  yuran november    same amount as INV-1007, INV-1008
+    9  2026-11-12 09:45     42.00  DuitNow transfer  no invoice found
+```
+
+## Input
+
+**invoices.csv**: header with `ref` and `amount`; optional `customer` and `due_date`. References must be unique
+(case and separators ignored, so `INV-1` and `inv 1` are the same reference).
+
+**payments.csv**: header with `date`, `amount` and `reference`; optional `payer` and `id` (transaction id, must be
+unique, which catches a statement pasted twice). Rows with an amount of zero or below (debits, bank charges,
+reversals) are left out and counted.
+
+Every column name can be changed with a flag (`--invoice-ref`, `--payment-reference`, ... see `--help`), so an
+export can be used as is. Bank export layouts differ; this tool does not guess them.
+
+- Amounts: `1234.50`, `1,234.50`, `RM 1,234.50`, `-10.00` or `(10.00)`; at most two decimals.
+- Dates: `2026-11-12` or day-first `12/11/2026` (also `12-11-2026`, `12.11.2026`), optionally followed by a time.
+  Month-first dates are not supported.
+
+## How matching works
+
+1. **Reference.** The payment's reference text is split into words and searched for invoice references, ignoring
+   case and separators: `inv 0012`, `INV0012` and `INV-0012` all match invoice `INV-0012`, but `INV-12` never
+   matches `INV-1`. A payment that names several invoices pays them in the order named; money left over goes to
+   the last one (reported as excess / overpaid). A payment for an invoice that is already fully paid is flagged as a
+   **possible duplicate**. Payments are applied in date (then time, then row) order.
+2. **Amount** (turn off with `--no-amount-match`). A payment with no reference found is matched to an invoice with
+   no money yet only when that invoice is the only open one with that exact amount **and** the payment is the only
+   unreferenced payment with that amount. These matches are labelled "by amount only" and always count as something
+   to check. Otherwise the payment is **ambiguous** (lists the invoices with the same amount) or **unmatched**.
+
+Short numeric references (for example `1001`) can match unrelated numbers in a reference text; use prefixed
+references (`INV-1001`) where you can.
+
+## Exit codes
+
+- `0`: every invoice paid exactly and every payment matched by reference
+- `1`: something to check (unpaid, partial, overpaid, possible duplicate, ambiguous, unmatched, matched by amount)
+- `2`: input error (message names the file and row)
+
+## Development
+
+```sh
+npm ci
+npm run check   # lint + typecheck + tests
+npm run build && npm run smoke
+```
+
+CI runs the same on Node 20 and 22. The library is exported from `src/index.ts` (`parseInvoices`,
+`parsePayments`, `reconcile`, report writers).
+
+## Limits
+
+- Matching rules only; it does not read PDFs or bank portals and does not call any payment API.
+- No fuzzy name matching on payer names (planned as an optional hint, not an automatic match).
+- Not accounting advice; check flagged rows by hand.
+
+MIT licence.
